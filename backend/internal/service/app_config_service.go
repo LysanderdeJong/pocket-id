@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 	"strings"
@@ -330,6 +331,31 @@ func (s *AppConfigService) LoadDbConfig(ctx context.Context) (err error) {
 	s.dbConfig.Store(dest)
 
 	return nil
+}
+
+func (s *AppConfigService) RunReloadLoop(interval time.Duration) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if interval <= 0 {
+			interval = time.Minute
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if err := s.LoadDbConfig(ctx); err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					slog.WarnContext(ctx, "Failed to reload app config", slog.Any("error", err))
+				}
+			}
+		}
+	}
 }
 
 func (s *AppConfigService) loadDbConfigInternal(ctx context.Context, tx *gorm.DB) (*model.AppConfig, error) {
