@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -20,6 +22,31 @@ func NewTestAppConfigService(config *model.AppConfig) *AppConfigService {
 	service.dbConfig.Store(config)
 
 	return service
+}
+
+func TestAppConfigServiceRunReloadLoop(t *testing.T) {
+	db := testutils.NewDatabaseForTest(t)
+
+	reader := &AppConfigService{db: db}
+	require.NoError(t, reader.LoadDbConfig(t.Context()))
+	require.Equal(t, "Pocket ID", reader.GetDbConfig().AppName.Value)
+
+	writer := &AppConfigService{db: db}
+	require.NoError(t, writer.LoadDbConfig(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- reader.RunReloadLoop(10 * time.Millisecond)(ctx)
+	}()
+
+	require.NoError(t, writer.UpdateAppConfigValues(t.Context(), "appName", "Pocket ID HA"))
+	require.Eventually(t, func() bool {
+		return reader.GetDbConfig().AppName.Value == "Pocket ID HA"
+	}, time.Second, 10*time.Millisecond)
+
+	cancel()
+	require.NoError(t, <-errCh)
 }
 
 func TestLoadDbConfig(t *testing.T) {

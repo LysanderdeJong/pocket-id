@@ -2,7 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -18,6 +17,11 @@ import (
 )
 
 func Bootstrap(ctx context.Context) error {
+	const (
+		appConfigReloadInterval      = 30 * time.Second
+		databaseVersionCheckInterval = 10 * time.Second
+	)
+
 	var shutdownFns []utils.Service
 	defer func() { //nolint:contextcheck
 		// Invoke all shutdown functions on exit
@@ -39,6 +43,10 @@ func Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
+	sqlDb, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get sql.DB: %w", err)
+	}
 
 	fileStorage, err := InitStorage(ctx, db)
 	if err != nil {
@@ -50,43 +58,12 @@ func Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize application images: %w", err)
 	}
 
-	scheduler, err := job.NewScheduler()
-	if err != nil {
-		return fmt.Errorf("failed to create job scheduler: %w", err)
-	}
+	scimScheduler := job.NewSwitchableScheduler()
 
 	// Create all services
-	svc, err := initServices(ctx, db, httpClient, imageExtensions, fileStorage, scheduler)
+	svc, err := initServices(ctx, db, httpClient, imageExtensions, fileStorage, scimScheduler)
 	if err != nil {
 		return fmt.Errorf("failed to initialize services: %w", err)
-	}
-
-	waitUntil, err := svc.appLockService.Acquire(ctx, false)
-	if errors.Is(err, service.ErrLockUnavailable) {
-		return errors.New("it appears that there's already one instance of Pocket ID running; running multiple replicas of Pocket ID is currently not supported")
-	} else if err != nil {
-		return fmt.Errorf("failed to acquire application lock: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(time.Until(waitUntil)):
-	}
-
-	shutdownFn := func(shutdownCtx context.Context) error {
-		sErr := svc.appLockService.Release(shutdownCtx)
-		if sErr != nil {
-			return fmt.Errorf("failed to release application lock: %w", sErr)
-		}
-		return nil
-	}
-	shutdownFns = append(shutdownFns, shutdownFn)
-
-	// Register scheduled jobs
-	err = registerScheduledJobs(ctx, db, svc, httpClient, scheduler)
-	if err != nil {
-		return fmt.Errorf("failed to register scheduled jobs: %w", err)
 	}
 
 	// Init the router
@@ -95,12 +72,37 @@ func Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize router: %w", err)
 	}
 
+	leaderRunner := service.NewLeaderElectionRunner(svc.appLockService, func(leaderCtx context.Context) ([]utils.Service, func(), error) {
+		scheduler, err := job.NewScheduler()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create job scheduler: %w", err)
+		}
+
+		scimScheduler.SetActive(scheduler)
+		cleanup := func() {
+			scimScheduler.ClearActive(scheduler)
+		}
+
+		if err := registerScheduledJobs(leaderCtx, db, svc, httpClient, scheduler); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+
+		services := []utils.Service{svc.appLockService.RunRenewal}
+		if common.EnvConfig.AppEnv != "test" {
+			services = append(services, scheduler.Run)
+		}
+
+		return services, cleanup, nil
+	})
+
 	// Run all background services
 	// This call blocks until the context is canceled
-	services := []utils.Service{svc.appLockService.RunRenewal, router}
-
-	if common.EnvConfig.AppEnv != "test" {
-		services = append(services, scheduler.Run)
+	services := []utils.Service{
+		router,
+		leaderRunner.Run,
+		svc.appConfigService.RunReloadLoop(appConfigReloadInterval),
+		utils.RunDatabaseVersionMonitor(sqlDb, databaseVersionCheckInterval),
 	}
 
 	err = utils.NewServiceRunner(services...).Run(ctx)
