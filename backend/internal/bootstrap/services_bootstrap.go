@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/pocket-id/pocket-id/backend/internal/job"
 	"gorm.io/gorm"
 
 	"github.com/pocket-id/pocket-id/backend/internal/service"
@@ -35,7 +34,7 @@ type services struct {
 }
 
 // Initializes all services
-func initServices(ctx context.Context, db *gorm.DB, httpClient *http.Client, imageExtensions map[string]string, fileStorage storage.FileStorage, scheduler *job.Scheduler) (svc *services, err error) {
+func initServices(ctx context.Context, db *gorm.DB, httpClient *http.Client, imageExtensions map[string]string, fileStorage storage.FileStorage, scheduler service.Scheduler) (svc *services, err error) {
 	svc = &services{}
 
 	svc.appConfigService, err = service.NewAppConfigService(ctx, db)
