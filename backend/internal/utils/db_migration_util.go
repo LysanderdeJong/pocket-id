@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database"
@@ -18,6 +19,17 @@ import (
 	"github.com/pocket-id/pocket-id/backend/resources"
 )
 
+var (
+	ErrDatabaseMigrationDirty = errors.New("database migration is dirty")
+	ErrDatabaseVersionTooNew  = errors.New("database version is newer than application version")
+)
+
+type DatabaseVersionInfo struct {
+	CurrentVersion  uint
+	RequiredVersion uint
+	Dirty           bool
+}
+
 // MigrateDatabase applies database migrations using embedded migration files or fetches them from GitHub if a downgrade is detected.
 func MigrateDatabase(ctx context.Context, sqlDb *sql.DB) error {
 	m, cleanup, err := GetEmbeddedMigrateInstance(ctx, sqlDb)
@@ -26,8 +38,7 @@ func MigrateDatabase(ctx context.Context, sqlDb *sql.DB) error {
 	}
 	defer cleanup()
 
-	path := "migrations/" + string(common.EnvConfig.DbProvider)
-	requiredVersion, err := getRequiredMigrationVersion(path)
+	requiredVersion, err := GetRequiredMigrationVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get last migration version: %w", err)
 	}
@@ -54,6 +65,77 @@ func MigrateDatabase(ctx context.Context, sqlDb *sql.DB) error {
 	}
 
 	return nil
+}
+
+func GetRequiredMigrationVersion() (uint, error) {
+	path := "migrations/" + string(common.EnvConfig.DbProvider)
+	return getRequiredMigrationVersion(path)
+}
+
+func GetCurrentMigrationVersion(ctx context.Context, sqlDb *sql.DB) (version uint, dirty bool, err error) {
+	err = sqlDb.QueryRowContext(ctx, "SELECT version, dirty FROM schema_migrations LIMIT 1").Scan(&version, &dirty)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to query current migration version: %w", err)
+	}
+
+	return version, dirty, nil
+}
+
+func CheckDatabaseVersionSupported(ctx context.Context, sqlDb *sql.DB) (DatabaseVersionInfo, error) {
+	requiredVersion, err := GetRequiredMigrationVersion()
+	if err != nil {
+		return DatabaseVersionInfo{}, fmt.Errorf("failed to get required migration version: %w", err)
+	}
+
+	currentVersion, dirty, err := GetCurrentMigrationVersion(ctx, sqlDb)
+	if err != nil {
+		return DatabaseVersionInfo{}, err
+	}
+
+	info := DatabaseVersionInfo{
+		CurrentVersion:  currentVersion,
+		RequiredVersion: requiredVersion,
+		Dirty:           dirty,
+	}
+
+	if dirty {
+		return info, fmt.Errorf("%w: version %d", ErrDatabaseMigrationDirty, currentVersion)
+	}
+
+	if currentVersion > requiredVersion && !common.EnvConfig.AllowDowngrade {
+		return info, fmt.Errorf("%w: database version (%d) is newer than application version (%d)", ErrDatabaseVersionTooNew, currentVersion, requiredVersion)
+	}
+
+	return info, nil
+}
+
+func RunDatabaseVersionMonitor(sqlDb *sql.DB, interval time.Duration) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if interval <= 0 {
+			interval = time.Minute
+		}
+
+		if _, err := CheckDatabaseVersionSupported(ctx, sqlDb); err != nil {
+			return err
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if _, err := CheckDatabaseVersionSupported(ctx, sqlDb); err != nil {
+					return err
+				}
+			}
+		}
+	}
 }
 
 // GetEmbeddedMigrateInstance creates a migrate.Migrate instance using embedded migration files.

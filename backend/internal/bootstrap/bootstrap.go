@@ -2,7 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -18,11 +17,17 @@ import (
 	"github.com/pocket-id/pocket-id/backend/internal/job"
 	"github.com/pocket-id/pocket-id/backend/internal/service"
 	"github.com/pocket-id/pocket-id/backend/internal/storage"
+	"github.com/pocket-id/pocket-id/backend/internal/utils"
 )
 
 func Bootstrap(ctx context.Context) error {
+	const (
+		appConfigReloadInterval      = 30 * time.Second
+		databaseVersionCheckInterval = 10 * time.Second
+	)
+
 	// List of services to run
-	services := make([]servicerunner.Service, 0, 3)
+	services := make([]servicerunner.Service, 0, 6)
 	shutdowns := &shutdownManager{
 		fns: make([]servicerunner.Service, 0, 4),
 	}
@@ -48,6 +53,11 @@ func Bootstrap(ctx context.Context) error {
 		}()
 	}
 
+	sqlDb, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get sql.DB: %w", err)
+	}
+
 	// Load the instance ID
 	// This is stored in the "kv" table, and generated on first startup
 	instanceID, err := instanceid.Load(ctx, db)
@@ -67,11 +77,7 @@ func Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize application images: %w", err)
 	}
 
-	// Init the scheduler
-	scheduler, err := job.NewScheduler()
-	if err != nil {
-		return fmt.Errorf("failed to create job scheduler: %w", err)
-	}
+	scimScheduler := job.NewSwitchableScheduler()
 
 	// Init the actors
 	// The actor host is created and started before the services, so services can depend on it once it's ready
@@ -100,43 +106,10 @@ func Bootstrap(ctx context.Context) error {
 	services = append(services, actorsRun)
 
 	// Create all services
-	svc, err := initServices(ctx, db, instanceID, httpClient, imageExtensions, fileStorage, scheduler)
+	svc, err := initServices(ctx, db, instanceID, httpClient, imageExtensions, fileStorage, scimScheduler)
 	if err != nil {
 		return fmt.Errorf("failed to initialize services: %w", err)
 	}
-	services = append(services, svc.appLockService.RunRenewal)
-
-	// Acquire the lock from the app lock service
-	waitUntil, err := svc.appLockService.Acquire(ctx, false)
-	if errors.Is(err, service.ErrLockUnavailable) {
-		return errors.New("it appears that there's already one instance of Pocket ID running; running multiple replicas of Pocket ID is currently not supported")
-	} else if err != nil {
-		return fmt.Errorf("failed to acquire application lock: %w", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(time.Until(waitUntil)):
-	}
-
-	shutdowns.Add(func(shutdownCtx context.Context) error {
-		sErr := svc.appLockService.Release(shutdownCtx)
-		if sErr != nil {
-			return fmt.Errorf("failed to release application lock: %w", sErr)
-		}
-		return nil
-	})
-
-	// Register scheduled jobs, only in non-test mode
-	if common.EnvConfig.AppEnv != "test" {
-		err = registerScheduledJobs(ctx, db, svc, scheduler)
-		if err != nil {
-			return fmt.Errorf("failed to register scheduled jobs: %w", err)
-		}
-		services = append(services, scheduler.Run)
-	}
-
 	// Init the router
 	// The rate-limit middleware invokes the actor host with each request's own context, so the setup context is intentionally not threaded through the router
 	//nolint:contextcheck
@@ -145,8 +118,37 @@ func Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize router: %w", err)
 	}
 
+	leaderRunner := service.NewLeaderElectionRunner(svc.appLockService, func(leaderCtx context.Context) ([]servicerunner.Service, func(), error) {
+		scheduler, err := job.NewScheduler()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create job scheduler: %w", err)
+		}
+
+		scimScheduler.SetActive(scheduler)
+		cleanup := func() {
+			scimScheduler.ClearActive(scheduler)
+		}
+
+		if err := registerScheduledJobs(leaderCtx, db, svc, scheduler); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+
+		leaderServices := []servicerunner.Service{svc.appLockService.RunRenewal}
+		if common.EnvConfig.AppEnv != "test" {
+			leaderServices = append(leaderServices, scheduler.Run)
+		}
+
+		return leaderServices, cleanup, nil
+	})
+
 	// The router must wait on the actor host being ready, since the rate-limit middleware invokes actors
-	services = append(services, actorsReady.Await(router))
+	services = append(services,
+		actorsReady.Await(router),
+		leaderRunner.Run,
+		svc.appConfigService.RunReloadLoop(appConfigReloadInterval),
+		utils.RunDatabaseVersionMonitor(sqlDb, databaseVersionCheckInterval),
+	)
 
 	// Run all background services
 	// This call blocks until the context is canceled
