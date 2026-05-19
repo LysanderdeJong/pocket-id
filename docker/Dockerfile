@@ -56,7 +56,8 @@ RUN apk add --no-cache curl su-exec
 COPY --from=backend-builder /build/pocket-id /app/pocket-id
 COPY ./scripts/docker /app/docker
 
-RUN chmod +x /app/pocket-id && \
+RUN find /app/docker -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
+  chmod +x /app/pocket-id && \
   find /app/docker -name "*.sh" -exec chmod +x {} \;
 
 EXPOSE 1411
