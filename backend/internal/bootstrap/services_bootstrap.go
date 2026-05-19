@@ -31,11 +31,13 @@ type services struct {
 	appLockService       *service.AppLockService
 	userSignUpService    *service.UserSignUpService
 	oneTimeAccessService *service.OneTimeAccessService
+	scheduler            service.Scheduler
 }
 
 // Initializes all services
 func initServices(ctx context.Context, db *gorm.DB, httpClient *http.Client, imageExtensions map[string]string, fileStorage storage.FileStorage, scheduler service.Scheduler) (svc *services, err error) {
 	svc = &services{}
+	svc.scheduler = scheduler
 
 	svc.appConfigService, err = service.NewAppConfigService(ctx, db)
 	if err != nil {
