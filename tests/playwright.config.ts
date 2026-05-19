@@ -22,11 +22,12 @@ export default defineConfig({
 	},
 	projects: [
 		{ name: 'cli', testMatch: /cli\.spec\.ts/ },
+		{ name: 'ha', testMatch: /ha\.spec\.ts/ },
 		{ name: 'auth-setup', testMatch: /auth\.setup\.ts/ },
 		{
 			name: 'browser-chrome',
 			use: { ...devices['Desktop Chrome'], storageState: '.tmp/auth/user.json' },
-			testIgnore: /cli\.spec\.ts/,
+			testIgnore: /cli\.spec\.ts|ha\.spec\.ts/,
 			dependencies: ['auth-setup']
 		}
 	],
