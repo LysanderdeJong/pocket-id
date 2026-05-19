@@ -15,6 +15,11 @@ func NewTestController(group *gin.RouterGroup, testService *service.TestService)
 
 	group.POST("/test/reset", testController.resetAndSeedHandler)
 	group.POST("/test/refreshtoken", testController.signRefreshToken)
+	group.GET("/test/leadership", testController.getLeadershipHandler)
+	group.GET("/test/app-config/app-name", testController.getAppNameHandler)
+	group.POST("/test/app-config/app-name", testController.updateAppNameHandler)
+	group.POST("/test/scheduler-probe/:name", testController.registerSchedulerProbeHandler)
+	group.GET("/test/scheduler-probe/:name", testController.getSchedulerProbeHandler)
 
 	group.GET("/externalidp/jwks.json", testController.externalIdPJWKS)
 	group.POST("/externalidp/sign", testController.externalIdPSignToken)
@@ -127,4 +132,54 @@ func (tc *TestController) signRefreshToken(c *gin.Context) {
 	}
 
 	c.Writer.WriteString(token)
+}
+
+func (tc *TestController) getLeadershipHandler(c *gin.Context) {
+	isLeader, hostID, err := tc.TestService.GetLeadership(c.Request.Context())
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"leader": isLeader, "hostID": hostID})
+}
+
+func (tc *TestController) getAppNameHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"value": tc.TestService.GetAppName()})
+}
+
+func (tc *TestController) updateAppNameHandler(c *gin.Context) {
+	var input struct {
+		Value string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	if err := tc.TestService.UpdateAppName(c.Request.Context(), input.Value); err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+func (tc *TestController) registerSchedulerProbeHandler(c *gin.Context) {
+	if err := tc.TestService.RegisterSchedulerProbe(c.Request.Context(), c.Param("name")); err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+func (tc *TestController) getSchedulerProbeHandler(c *gin.Context) {
+	value, err := tc.TestService.GetSchedulerProbe(c.Request.Context(), c.Param("name"))
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"value": value})
 }

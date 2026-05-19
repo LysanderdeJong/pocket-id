@@ -31,15 +31,29 @@ func TestSwitchableScheduler(t *testing.T) {
 		scheduler.SetActive(active)
 		require.Empty(t, active.registered)
 	})
+
+	t.Run("replays pending jobs after original request context is canceled", func(t *testing.T) {
+		scheduler := NewSwitchableScheduler()
+		ctx, cancel := context.WithCancel(t.Context())
+		require.NoError(t, scheduler.RegisterJob(ctx, "test", gocron.DurationJob(time.Hour), func(ctx context.Context) error { return nil }, service.RegisterJobOpts{}))
+		cancel()
+
+		active := &fakeScheduler{}
+		scheduler.SetActive(active)
+		require.Equal(t, []string{"test"}, active.registered)
+		require.NoError(t, active.contextErr)
+	})
 }
 
 type fakeScheduler struct {
 	registered []string
 	removed    []string
+	contextErr error
 }
 
 func (s *fakeScheduler) RegisterJob(ctx context.Context, name string, def gocron.JobDefinition, job func(ctx context.Context) error, opts service.RegisterJobOpts) error {
 	s.registered = append(s.registered, name)
+	s.contextErr = ctx.Err()
 	return nil
 }
 
