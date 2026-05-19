@@ -39,7 +39,7 @@ func (s *SwitchableScheduler) SetActive(active service.Scheduler) {
 	s.mu.Unlock()
 
 	for _, job := range pending {
-		if err := active.RegisterJob(job.ctx, job.name, job.def, job.jobFn, job.opts); err != nil {
+		if err := active.RegisterJob(context.Background(), job.name, job.def, job.jobFn, job.opts); err != nil {
 			slog.WarnContext(job.ctx, "Failed to register pending job", slog.String("name", job.name), slog.Any("error", err))
 		}
 	}

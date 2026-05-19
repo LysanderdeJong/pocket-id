@@ -8,11 +8,14 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
+	"strings"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v3/jwa"
@@ -23,6 +26,7 @@ import (
 	fositejwt "github.com/ory/fosite/token/jwt"
 	"github.com/pocket-id/pocket-id/backend/internal/apikey"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/pocket-id/pocket-id/backend/internal/api"
 	"github.com/pocket-id/pocket-id/backend/internal/common"
@@ -44,6 +48,7 @@ type TestService struct {
 	ldapService      *LdapService
 	fileStorage      storage.FileStorage
 	appLockService   *AppLockService
+	scheduler        Scheduler
 	externalIdPKey   jwk.Key
 }
 
@@ -54,7 +59,7 @@ const (
 	e2eRefreshTokenExpiredFixtureToken = "X4vqwtRyCUaq51UafHea4Fsg8Km6CAns6vp3tuX4"
 )
 
-func NewTestService(db *gorm.DB, appConfigService *AppConfigService, jwtService *JwtService, ldapService *LdapService, appLockService *AppLockService, fileStorage storage.FileStorage) (*TestService, error) {
+func NewTestService(db *gorm.DB, appConfigService *AppConfigService, jwtService *JwtService, ldapService *LdapService, appLockService *AppLockService, fileStorage storage.FileStorage, scheduler Scheduler) (*TestService, error) {
 	s := &TestService{
 		db:               db,
 		appConfigService: appConfigService,
@@ -62,12 +67,80 @@ func NewTestService(db *gorm.DB, appConfigService *AppConfigService, jwtService 
 		ldapService:      ldapService,
 		appLockService:   appLockService,
 		fileStorage:      fileStorage,
+		scheduler:        scheduler,
 	}
 	err := s.initExternalIdP()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize external IdP: %w", err)
 	}
 	return s, nil
+}
+
+func (s *TestService) GetLeadership(ctx context.Context) (bool, string, error) {
+	var lock model.KV
+	if err := s.db.WithContext(ctx).First(&lock, "key = ?", lockKey).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	if lock.Value == nil {
+		return false, "", nil
+	}
+
+	var value lockValue
+	if err := value.Unmarshal(*lock.Value); err != nil {
+		return false, "", err
+	}
+
+	isLeader := value.LockID == s.appLockService.lockID && value.ExpiresAt > time.Now().Unix()
+	return isLeader, value.HostID, nil
+}
+
+func (s *TestService) GetAppName() string {
+	return s.appConfigService.GetDbConfig().AppName.Value
+}
+
+func (s *TestService) UpdateAppName(ctx context.Context, value string) error {
+	return s.appConfigService.UpdateAppConfigValues(ctx, "appName", value)
+}
+
+func (s *TestService) RegisterSchedulerProbe(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("probe name is required")
+	}
+
+	jobName := "HAProbe_" + name
+	return s.scheduler.RegisterJob(ctx, jobName, gocron.DurationJob(time.Second), func(ctx context.Context) error {
+		value := fmt.Sprintf("%s:%d", s.appLockService.hostID, time.Now().UnixNano())
+		return s.upsertKV(ctx, schedulerProbeKey(name), value)
+	}, RegisterJobOpts{})
+}
+
+func (s *TestService) GetSchedulerProbe(ctx context.Context, name string) (string, error) {
+	var kv model.KV
+	if err := s.db.WithContext(ctx).First(&kv, "key = ?", schedulerProbeKey(name)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if kv.Value == nil {
+		return "", nil
+	}
+	return *kv.Value, nil
+}
+
+func (s *TestService) upsertKV(ctx context.Context, key string, value string) error {
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&model.KV{Key: key, Value: &value}).Error
+}
+
+func schedulerProbeKey(name string) string {
+	return "ha_scheduler_probe_" + strings.TrimSpace(name)
 }
 
 // Initializes the "external IdP"

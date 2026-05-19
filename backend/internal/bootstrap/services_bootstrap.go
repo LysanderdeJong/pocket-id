@@ -34,6 +34,7 @@ type services struct {
 	fileStorage          storage.FileStorage
 	appLockService       *service.AppLockService
 	oneTimeAccessService *service.OneTimeAccessService
+	scheduler            service.Scheduler
 
 	apiKeyModule     *apikey.Module
 	oidcModule       *oidc.Module
@@ -45,6 +46,7 @@ type services struct {
 // Initializes all services
 func initServices(ctx context.Context, db *gorm.DB, instanceID string, httpClient *http.Client, imageExtensions map[string]string, fileStorage storage.FileStorage, scheduler service.Scheduler) (svc *services, err error) {
 	svc = &services{}
+	svc.scheduler = scheduler
 
 	svc.appConfigService, err = service.NewAppConfigService(ctx, db)
 	if err != nil {

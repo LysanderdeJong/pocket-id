@@ -135,7 +135,7 @@ func Bootstrap(ctx context.Context) error {
 		}
 
 		leaderServices := []servicerunner.Service{svc.appLockService.RunRenewal}
-		if common.EnvConfig.AppEnv != "test" {
+		if common.EnvConfig.AppEnv != "test" || len(registerTestControllers) > 0 {
 			leaderServices = append(leaderServices, scheduler.Run)
 		}
 
