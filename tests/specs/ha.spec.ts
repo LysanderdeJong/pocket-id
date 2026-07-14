@@ -59,7 +59,7 @@ test.describe('HA multi-replica behavior', () => {
 		expect(tokenData.access_token).toBeDefined();
 		expect(tokenData.refresh_token).toBeDefined();
 		expect(tokenData.id_token).toBeDefined();
-		expect(tokenData.token_type).toBe('Bearer');
+		expect(tokenData.token_type.toLowerCase()).toBe('bearer');
 	});
 
 	test('app config changes reload across replicas', async () => {
